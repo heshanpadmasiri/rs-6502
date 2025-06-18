@@ -1,0 +1,1 @@
+- Don't add comments explaining every line of code.
