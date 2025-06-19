@@ -3,10 +3,10 @@ struct CPU {
     accumulator: u8,      // ac
     x: u8,
     y: u8,
-    stack_pointer: u8,  // sp
-    status: u8,         // sr
-    ram: [u8; 0x10000], // 64KB of RAM
-    rom: Vec<u8>,       // ROM data (variable size)
+    stack_pointer: Address, // sp
+    status: u8,             // sr
+    ram: [u8; 0x10000],     // 64KB of RAM
+    rom: Vec<u8>,           // ROM data (variable size)
 }
 type Address = u16;
 
@@ -22,6 +22,17 @@ impl CPU {
             ram: [0; 0x10000],   // Initialize RAM to zero
             rom: Vec::new(),     // Initialize empty ROM
         }
+    }
+
+    pub fn push_to_stack(&mut self, value: u8) {
+        if self.stack_pointer > 0x01FF {
+            panic!("Stack underflow");
+        }
+        if self.stack_pointer == 0x0100 {
+            panic!("Stack overflow");
+        }
+        self.ram[self.stack_pointer as usize] = value;
+        self.stack_pointer = self.stack_pointer.wrapping_sub(1);
     }
 
     pub fn insert_rom(&mut self, rom_data: Vec<u8>) {
@@ -240,6 +251,25 @@ impl Instruction for LDA {
     }
 }
 
+struct BRK {}
+
+impl Instruction for BRK {
+    fn execute(&self, cpu: &mut CPU, current_tick: u8) -> bool {
+        if current_tick < 7 {
+            return false;
+        }
+        let pc = cpu.program_counter.wrapping_add(2);
+        cpu.push_to_stack((pc >> 8) as u8);
+        cpu.push_to_stack((pc & 0xFF) as u8);
+        cpu.set_flag(StatusFlags::Break);
+
+        let status = cpu.get_status();
+        cpu.push_to_stack(status);
+        cpu.program_counter += 1;
+        true
+    }
+}
+
 // TODO: I don't like the fact we need to do dynamic dispatch here (this means 2 "table" lookups per instruction).
 //  Need to think of a better solution
 fn init_op_table() -> [Option<Box<dyn Instruction>>; 256] {
@@ -296,6 +326,10 @@ fn init_op_table() -> [Option<Box<dyn Instruction>>; 256] {
             }),
             opc: 0xB1,
         },
+        InstructionData {
+            instruction: Box::new(BRK {}),
+            opc: 0x00,
+        },
     ];
     let mut op_table: [Option<Box<dyn Instruction>>; 256] = core::array::from_fn(|_| None);
     for inst in instructions {
@@ -309,11 +343,18 @@ fn execute_rom(cpu: &mut CPU, rom: Vec<u8>) {
     cpu.insert_rom(rom);
     let op_code_table = init_op_table();
     let mut current_tick = 0;
-    while cpu.program_counter != 0x0000 {
+    while !cpu.is_flag_set(StatusFlags::Break) {
         let opcode = cpu.read_byte_from_rom(cpu.program_counter);
         if let Some(instruction) = op_code_table[opcode as usize].as_ref() {
+            let pc_before = cpu.program_counter;
+            cpu.program_counter += 1;
             let done = instruction.execute(cpu, current_tick);
-            current_tick = if done { 0 } else { current_tick + 1 };
+            if done {
+                current_tick = 0;
+            } else {
+                cpu.program_counter = pc_before;
+                current_tick += 1;
+            }
         } else {
             panic!(
                 "Unknown opcode: {:#04X} at PC: {:#04X}",
@@ -1119,6 +1160,118 @@ mod tests {
         assert_eq!(
             cpu.program_counter, 0x8002,
             "PC should advance by 2 for absolute mode"
+        );
+    }
+
+    #[test]
+    fn test_rom_lda_and_brk() {
+        let mut cpu = CPU::new();
+        let mut rom = vec![0; 0xFFFE];
+
+        // Set reset vector to 0x8000
+        rom[0xFFFC] = 0x00; // Low byte of reset vector
+        rom[0xFFFD] = 0x80; // High byte of reset vector (0x8000)
+
+        // Program: LDA #$42, BRK
+        rom[0x8000] = 0xA9; // LDA immediate opcode
+        rom[0x8001] = 0x42; // Value to load into A register
+        rom[0x8002] = 0x00; // BRK opcode
+
+        // Execute the ROM
+        execute_rom(&mut cpu, rom);
+
+        // Verify the A register contains the expected value
+        assert_eq!(
+            cpu.accumulator, 0x42,
+            "A register should contain 0x42 after LDA #$42"
+        );
+
+        // Verify BRK was executed (Break flag should be set)
+        assert!(
+            cpu.is_flag_set(StatusFlags::Break),
+            "Break flag should be set after BRK instruction"
+        );
+
+        // Verify flags set by LDA
+        assert!(
+            !cpu.is_flag_set(StatusFlags::Zero),
+            "Zero flag should not be set for non-zero value"
+        );
+        assert!(
+            !cpu.is_flag_set(StatusFlags::Negative),
+            "Negative flag should not be set for positive value"
+        );
+    }
+
+    #[test]
+    fn test_rom_lda_zero_and_brk() {
+        let mut cpu = CPU::new();
+        let mut rom = vec![0; 0xFFFE];
+
+        // Set reset vector to 0x8000
+        rom[0xFFFC] = 0x00;
+        rom[0xFFFD] = 0x80;
+
+        // Program: LDA #$00, BRK
+        rom[0x8000] = 0xA9; // LDA immediate opcode
+        rom[0x8001] = 0x00; // Zero value to load
+        rom[0x8002] = 0x00; // BRK opcode
+
+        execute_rom(&mut cpu, rom);
+
+        assert_eq!(
+            cpu.accumulator, 0x00,
+            "A register should contain 0x00 after LDA #$00"
+        );
+
+        assert!(
+            cpu.is_flag_set(StatusFlags::Break),
+            "Break flag should be set after BRK instruction"
+        );
+
+        assert!(
+            cpu.is_flag_set(StatusFlags::Zero),
+            "Zero flag should be set for zero value"
+        );
+        assert!(
+            !cpu.is_flag_set(StatusFlags::Negative),
+            "Negative flag should not be set for zero value"
+        );
+    }
+
+    #[test]
+    fn test_rom_lda_negative_and_brk() {
+        let mut cpu = CPU::new();
+        let mut rom = vec![0; 0xFFFE];
+
+        // Set reset vector to 0x8000
+        rom[0xFFFC] = 0x00;
+        rom[0xFFFD] = 0x80;
+
+        // Program: LDA #$FF, BRK
+        rom[0x8000] = 0xA9; // LDA immediate opcode
+        rom[0x8001] = 0xFF; // Negative value (0xFF = -1 in signed 8-bit)
+        rom[0x8002] = 0x00; // BRK opcode
+
+        execute_rom(&mut cpu, rom);
+
+        assert_eq!(
+            cpu.accumulator, 0xFF,
+            "A register should contain 0xFF after LDA #$FF"
+        );
+
+        assert!(
+            cpu.is_flag_set(StatusFlags::Break),
+            "Break flag should be set after BRK instruction"
+        );
+
+        assert!(
+            !cpu.is_flag_set(StatusFlags::Zero),
+            "Zero flag should not be set for non-zero value"
+        );
+        assert!(
+            cpu.is_flag_set(StatusFlags::Negative),
+            "Negative flag should be set for negative value"
         );
     }
 }
