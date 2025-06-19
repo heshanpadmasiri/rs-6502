@@ -1,3 +1,6 @@
+use std::env;
+use std::fs;
+
 struct CPU {
     program_counter: u16, // pc
     accumulator: u8,      // ac
@@ -365,7 +368,174 @@ fn execute_rom(cpu: &mut CPU, rom: Vec<u8>) {
 }
 
 pub fn main() {
+    let args: Vec<String> = env::args().collect();
+
+    if args.len() < 2 || args.len() > 3 {
+        eprintln!("Usage: {} <rom_file> [--heap-dump]", args[0]);
+        eprintln!("  <rom_file>     Path to the ROM file to execute");
+        eprintln!("  --heap-dump    Optional: Print memory state in hex pages");
+        std::process::exit(1);
+    }
+
+    let rom_path = &args[1];
+    let heap_dump = args.len() == 3 && args[2] == "--heap-dump";
+
+    // Read ROM file as binary
+    let rom_data = match fs::read(rom_path) {
+        Ok(data) => data,
+        Err(err) => {
+            eprintln!("Error reading ROM file '{}': {}", rom_path, err);
+            std::process::exit(1);
+        }
+    };
+
     println!("6502 CPU Emulator");
+    println!("Loading ROM: {} ({} bytes)", rom_path, rom_data.len());
+
+    // Create CPU and execute ROM
+    let mut cpu = CPU::new();
+    execute_rom(&mut cpu, rom_data);
+
+    println!("Execution completed.");
+    println!();
+
+    // Display final register states
+    print_cpu_status(&cpu);
+
+    // Display memory dump if requested
+    if heap_dump {
+        println!();
+        print_memory_dump(&cpu);
+    }
+}
+
+fn print_cpu_status(cpu: &CPU) {
+    println!("=== CPU Register Status ===");
+    println!(
+        "Program Counter (PC): ${:04X} ({:5})",
+        cpu.program_counter, cpu.program_counter
+    );
+    println!(
+        "Accumulator     (A):  ${:02X} ({:3})",
+        cpu.accumulator, cpu.accumulator
+    );
+    println!("X Register      (X):  ${:02X} ({:3})", cpu.x, cpu.x);
+    println!("Y Register      (Y):  ${:02X} ({:3})", cpu.y, cpu.y);
+    println!(
+        "Stack Pointer  (SP):  ${:02X} ({:3})",
+        cpu.stack_pointer, cpu.stack_pointer
+    );
+
+    println!("Status Register (P):  ${:02X} ({})", cpu.status, cpu.status);
+    println!(
+        "  Flags: {} {} {} {} {} {} {} {}",
+        if cpu.is_flag_set(StatusFlags::Negative) {
+            "N"
+        } else {
+            "-"
+        },
+        if cpu.is_flag_set(StatusFlags::Overflow) {
+            "V"
+        } else {
+            "-"
+        },
+        if cpu.is_flag_set(StatusFlags::Unused) {
+            "U"
+        } else {
+            "-"
+        },
+        if cpu.is_flag_set(StatusFlags::Break) {
+            "B"
+        } else {
+            "-"
+        },
+        if cpu.is_flag_set(StatusFlags::Decimal) {
+            "D"
+        } else {
+            "-"
+        },
+        if cpu.is_flag_set(StatusFlags::InterruptDisable) {
+            "I"
+        } else {
+            "-"
+        },
+        if cpu.is_flag_set(StatusFlags::Zero) {
+            "Z"
+        } else {
+            "-"
+        },
+        if cpu.is_flag_set(StatusFlags::Carry) {
+            "C"
+        } else {
+            "-"
+        }
+    );
+}
+
+fn print_memory_dump(cpu: &CPU) {
+    println!("=== Memory Dump (64KB RAM) ===");
+
+    for page in 0..256 {
+        let page_start = page * 256;
+        let mut has_data = false;
+
+        // Check if this page has any non-zero data
+        for i in 0..256 {
+            if cpu.ram[page_start + i] != 0 {
+                has_data = true;
+                break;
+            }
+        }
+
+        // Only print pages that have data
+        if has_data {
+            println!();
+            println!(
+                "Page ${:02X} (${:04X}-${:04X}):",
+                page,
+                page_start,
+                page_start + 255
+            );
+
+            for row in 0..16 {
+                let row_start = page_start + (row * 16);
+                print!("  ${:04X}:", row_start);
+
+                // Print hex values
+                for col in 0..16 {
+                    let addr = row_start + col;
+                    print!(" {:02X}", cpu.ram[addr]);
+                }
+
+                print!("  ");
+
+                // Print ASCII representation
+                for col in 0..16 {
+                    let addr = row_start + col;
+                    let byte = cpu.ram[addr];
+                    if byte >= 32 && byte <= 126 {
+                        print!("{}", byte as char);
+                    } else {
+                        print!(".");
+                    }
+                }
+
+                println!();
+            }
+        }
+    }
+
+    // Also show ROM data summary
+    println!();
+    println!("=== ROM Summary ===");
+    println!("ROM Size: {} bytes", cpu.rom.len());
+    if !cpu.rom.is_empty() {
+        println!(
+            "Reset Vector: ${:04X}",
+            (cpu.rom.get(0xFFFD).unwrap_or(&0).clone() as u16) << 8
+                | (cpu.rom.get(0xFFFC).unwrap_or(&0).clone() as u16)
+        );
+    }
 }
 
 #[cfg(test)]
