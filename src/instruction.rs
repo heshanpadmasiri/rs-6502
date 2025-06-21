@@ -153,6 +153,18 @@ impl Instruction for BRK {
     }
 }
 
+pub struct NOP {}
+
+impl Instruction for NOP {
+    fn execute(&self, _cpu: &mut CPU, current_tick: u8) -> bool {
+        if current_tick < 2 {
+            return false;
+        }
+        true
+    }
+}
+
+// TODO: move this to instructions and give better name
 pub fn init_op_table() -> [Option<Box<dyn Instruction>>; 256] {
     struct InstructionData {
         instruction: Box<dyn Instruction>,
@@ -210,6 +222,10 @@ pub fn init_op_table() -> [Option<Box<dyn Instruction>>; 256] {
         InstructionData {
             instruction: Box::new(BRK {}),
             opc: 0x00,
+        },
+        InstructionData {
+            instruction: Box::new(NOP {}),
+            opc: 0xEA,
         },
     ];
     let mut op_table: [Option<Box<dyn Instruction>>; 256] = core::array::from_fn(|_| None);
@@ -1010,6 +1026,88 @@ mod tests {
         assert!(
             cpu.is_flag_set(StatusFlags::Negative),
             "Negative flag should be set for negative value"
+        );
+    }
+
+    #[test]
+    fn test_nop_instruction() {
+        let mut cpu = CPU::new();
+        let mut rom = vec![0; 0xFFFE];
+
+        // Set reset vector to 0x8000
+        rom[0xFFFC] = 0x00;
+        rom[0xFFFD] = 0x80;
+
+        cpu.insert_rom(rom);
+        cpu.program_counter = 0x8000;
+        
+        // Set initial values to verify they don't change
+        cpu.accumulator = 0x42;
+        cpu.x = 0x33;
+        cpu.y = 0x55;
+        cpu.stack_pointer = 0xFD;
+        cpu.set_flag(StatusFlags::Zero);
+        
+        let initial_status = cpu.get_status();
+
+        let nop = NOP {};
+
+        // Test insufficient ticks - should not complete
+        let result = nop.execute(&mut cpu, 1);
+        assert!(!result, "NOP should not complete with insufficient ticks");
+
+        // Test sufficient ticks - should complete
+        let result = nop.execute(&mut cpu, 2);
+        assert!(result, "NOP should complete with sufficient ticks");
+
+        // Verify no registers changed
+        assert_eq!(cpu.accumulator, 0x42, "Accumulator should not change");
+        assert_eq!(cpu.x, 0x33, "X register should not change");
+        assert_eq!(cpu.y, 0x55, "Y register should not change");
+        assert_eq!(cpu.stack_pointer, 0xFD, "Stack pointer should not change");
+        assert_eq!(cpu.get_status(), initial_status, "Status flags should not change");
+        
+        // PC should not change within the instruction (execute_rom handles PC increment)
+        assert_eq!(cpu.program_counter, 0x8000, "PC should not change within instruction");
+    }
+
+    #[test]
+    fn test_rom_nop_execution() {
+        let mut cpu = CPU::new();
+        let mut rom = vec![0; 0xFFFE];
+
+        // Set reset vector to 0x8000
+        rom[0xFFFC] = 0x00;
+        rom[0xFFFD] = 0x80;
+
+        // Program: NOP, LDA #$42, BRK
+        rom[0x8000] = 0xEA; // NOP opcode
+        rom[0x8001] = 0xA9; // LDA immediate opcode
+        rom[0x8002] = 0x42; // Value to load into A register
+        rom[0x8003] = 0x00; // BRK opcode
+
+        crate::execute_rom(&mut cpu, rom);
+
+        // Verify the A register contains the expected value (NOP shouldn't affect this)
+        assert_eq!(
+            cpu.accumulator, 0x42,
+            "A register should contain 0x42 after NOP and LDA #$42"
+        );
+
+        // Verify BRK was executed
+        assert!(
+            cpu.is_flag_set(StatusFlags::Break),
+            "Break flag should be set after BRK instruction"
+        );
+
+        // Verify flags set by LDA (NOP shouldn't affect flags)
+        assert!(
+            !cpu.is_flag_set(StatusFlags::Zero),
+            "Zero flag should not be set for non-zero value"
+        );
+        assert!(
+            !cpu.is_flag_set(StatusFlags::Negative),
+            "Negative flag should not be set for positive value"
         );
     }
 }
