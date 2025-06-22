@@ -74,6 +74,7 @@ ROM files must be 64KB (65536 bytes) and follow the 6502 memory layout:
 ## Supported Instructions
 
 - **LDA** - Load Accumulator
+- **STA** - Store Accumulator
 - **BRK** - Break
 
 ## Addressing Modes

@@ -16,43 +16,81 @@ pub enum AddressingMode {
 }
 
 impl AddressingMode {
-    pub fn load_value(&self, cpu: &mut CPU) -> (Address, u8) {
-        let (pc_increment, value) = match self {
-            AddressingMode::Immediate => (1, cpu.read_byte_from_rom(cpu.program_counter)),
+    pub fn target_address(&self, cpu: &CPU) -> Address {
+        match self {
+            AddressingMode::ZeroPage => cpu.read_byte_from_rom(cpu.program_counter) as u16,
+            AddressingMode::ZeroPageX => {
+                let addr = cpu.read_byte_from_rom(cpu.program_counter);
+                addr.wrapping_add(cpu.x) as u16
+            }
+            AddressingMode::ZeroPageY => {
+                let addr = cpu.read_byte_from_rom(cpu.program_counter);
+                addr.wrapping_add(cpu.y) as u16
+            }
+            AddressingMode::Absolute => cpu.read_u16_from_rom(cpu.program_counter),
+            AddressingMode::AbsoluteX => {
+                let addr = cpu.read_u16_from_rom(cpu.program_counter);
+                addr.wrapping_add(cpu.x as u16)
+            }
+            AddressingMode::AbsoluteY => {
+                let addr = cpu.read_u16_from_rom(cpu.program_counter);
+                addr.wrapping_add(cpu.y as u16)
+            }
+            AddressingMode::PreIndexedIndirect => {
+                let base = cpu.read_byte_from_rom(cpu.program_counter);
+                let addr = base.wrapping_add(cpu.x) as u16;
+                let low = cpu.read_byte(addr);
+                let high = cpu.read_byte(addr.wrapping_add(1));
+                (high as u16) << 8 | low as u16
+            }
+            AddressingMode::PostIndexedIndirect => {
+                let addr = cpu.read_byte_from_rom(cpu.program_counter) as u16;
+                let low = cpu.read_byte(addr);
+                let high = cpu.read_byte(addr.wrapping_add(1));
+                let addr = (high as u16) << 8 | low as u16;
+                addr.wrapping_add(cpu.y as u16)
+            }
+            _ => panic!("Unsupported addressing mode for target_address: {:?}", self),
+        }
+    }
+
+    pub fn load_value(&self, cpu: &CPU) -> u8 {
+        match self {
+            AddressingMode::Immediate => cpu.read_byte_from_rom(cpu.program_counter),
             AddressingMode::Absolute => {
                 let addr = cpu.read_u16_from_rom(cpu.program_counter);
-                (2, cpu.read_byte(addr))
+                cpu.read_byte(addr)
             }
             AddressingMode::ZeroPage => {
                 let addr = cpu.read_byte_from_rom(cpu.program_counter) as u16;
-                (1, cpu.read_byte(addr))
+                cpu.read_byte(addr)
             }
             AddressingMode::AbsoluteX => {
                 let addr = cpu.read_u16_from_rom(cpu.program_counter);
                 let addr = addr.wrapping_add(cpu.x as u16);
-                (2, cpu.read_byte(addr))
+                cpu.read_byte(addr)
             }
             AddressingMode::AbsoluteY => {
                 let addr = cpu.read_u16_from_rom(cpu.program_counter);
                 let addr = addr.wrapping_add(cpu.y as u16);
-                (2, cpu.read_byte(addr))
+                cpu.read_byte(addr)
             }
             AddressingMode::ZeroPageX => {
                 let addr = cpu.read_byte_from_rom(cpu.program_counter);
                 let addr = addr.wrapping_add(cpu.x) as u16;
-                (1, cpu.read_byte(addr))
+                cpu.read_byte(addr)
             }
             AddressingMode::ZeroPageY => {
                 let addr = cpu.read_byte_from_rom(cpu.program_counter);
                 let addr = addr.wrapping_add(cpu.y) as u16;
-                (1, cpu.read_byte(addr))
+                cpu.read_byte(addr)
             }
             AddressingMode::Indirect => {
                 let addr = cpu.read_u16_from_rom(cpu.program_counter);
                 let low = cpu.read_byte(addr);
                 let high = cpu.read_byte(addr.wrapping_add(1));
                 let effective_addr = (high as u16) << 8 | low as u16;
-                (2, cpu.read_byte(effective_addr))
+                cpu.read_byte(effective_addr)
             }
             AddressingMode::PreIndexedIndirect => {
                 let base = cpu.read_byte_from_rom(cpu.program_counter);
@@ -60,7 +98,7 @@ impl AddressingMode {
                 let low = cpu.read_byte(addr);
                 let high = cpu.read_byte(addr.wrapping_add(1));
                 let effective_addr = (high as u16) << 8 | low as u16;
-                (1, cpu.read_byte(effective_addr))
+                cpu.read_byte(effective_addr)
             }
             AddressingMode::PostIndexedIndirect => {
                 let addr = cpu.read_byte_from_rom(cpu.program_counter) as u16;
@@ -68,13 +106,12 @@ impl AddressingMode {
                 let high = cpu.read_byte(addr.wrapping_add(1));
                 let addr = (high as u16) << 8 | low as u16;
                 let addr = addr.wrapping_add(cpu.y as u16);
-                (1, cpu.read_byte(addr))
+                cpu.read_byte(addr)
             }
             AddressingMode::Relative => {
                 panic!("Relative addressing mode should not be used for loading values directly");
             }
-        };
-        (pc_increment, value)
+        }
     }
 
     pub fn is_crossing_page_boundary(&self, cpu: &CPU) -> bool {
@@ -89,6 +126,22 @@ impl AddressingMode {
                 is_crossing_page_boundary_inner(cpu.read_u16_from_rom(cpu.program_counter), cpu.y)
             }
             _ => false,
+        }
+    }
+
+    pub fn program_counter_increment(&self) -> Address {
+        match self {
+            AddressingMode::Immediate => 1,
+            AddressingMode::ZeroPage => 1,
+            AddressingMode::ZeroPageX => 1,
+            AddressingMode::ZeroPageY => 1,
+            AddressingMode::Absolute => 2,
+            AddressingMode::AbsoluteX => 2,
+            AddressingMode::AbsoluteY => 2,
+            AddressingMode::Indirect => 2,
+            AddressingMode::PreIndexedIndirect => 1,
+            AddressingMode::PostIndexedIndirect => 1,
+            AddressingMode::Relative => 1,
         }
     }
 }
@@ -117,7 +170,8 @@ impl Instruction for LDA {
         if current_tick < ticks {
             return false;
         }
-        let (pc_increment, value) = self.addressing_mode.load_value(cpu);
+        let value = self.addressing_mode.load_value(cpu);
+        let pc_increment = self.addressing_mode.program_counter_increment();
         cpu.program_counter += pc_increment;
         cpu.accumulator = value;
         if (value as i8) < 0 {
@@ -130,6 +184,36 @@ impl Instruction for LDA {
         } else {
             cpu.reset_flag(StatusFlags::Zero);
         }
+        return true;
+    }
+}
+
+pub struct STA {
+    pub addressing_mode: AddressingMode,
+}
+
+impl Instruction for STA {
+    fn execute(&self, cpu: &mut CPU, current_tick: u8) -> bool {
+        let ticks = match self.addressing_mode {
+            AddressingMode::ZeroPage => 3,
+            AddressingMode::ZeroPageX => 4,
+            AddressingMode::Absolute => 4,
+            AddressingMode::AbsoluteX => 5,
+            AddressingMode::AbsoluteY => 5,
+            AddressingMode::PreIndexedIndirect => 6,
+            AddressingMode::PostIndexedIndirect => 6,
+            _ => panic!(
+                "Unsupported addressing mode for STA: {:?}",
+                self.addressing_mode
+            ),
+        };
+        if current_tick < ticks {
+            return false;
+        };
+        let target_address = self.addressing_mode.target_address(cpu);
+        let pc_increment = self.addressing_mode.program_counter_increment();
+        cpu.program_counter += pc_increment;
+        cpu.write_byte(target_address, cpu.accumulator);
         return true;
     }
 }
@@ -226,6 +310,48 @@ pub fn init_op_table() -> [Option<Box<dyn Instruction>>; 256] {
         InstructionData {
             instruction: Box::new(NOP {}),
             opc: 0xEA,
+        },
+        InstructionData {
+            instruction: Box::new(STA {
+                addressing_mode: AddressingMode::ZeroPage,
+            }),
+            opc: 0x85,
+        },
+        InstructionData {
+            instruction: Box::new(STA {
+                addressing_mode: AddressingMode::ZeroPageX,
+            }),
+            opc: 0x95,
+        },
+        InstructionData {
+            instruction: Box::new(STA {
+                addressing_mode: AddressingMode::Absolute,
+            }),
+            opc: 0x8D,
+        },
+        InstructionData {
+            instruction: Box::new(STA {
+                addressing_mode: AddressingMode::AbsoluteX,
+            }),
+            opc: 0x9D,
+        },
+        InstructionData {
+            instruction: Box::new(STA {
+                addressing_mode: AddressingMode::AbsoluteY,
+            }),
+            opc: 0x99,
+        },
+        InstructionData {
+            instruction: Box::new(STA {
+                addressing_mode: AddressingMode::PreIndexedIndirect,
+            }),
+            opc: 0x81,
+        },
+        InstructionData {
+            instruction: Box::new(STA {
+                addressing_mode: AddressingMode::PostIndexedIndirect,
+            }),
+            opc: 0x91,
         },
     ];
     let mut op_table: [Option<Box<dyn Instruction>>; 256] = core::array::from_fn(|_| None);
@@ -1040,14 +1166,14 @@ mod tests {
 
         cpu.insert_rom(rom);
         cpu.program_counter = 0x8000;
-        
+
         // Set initial values to verify they don't change
         cpu.accumulator = 0x42;
         cpu.x = 0x33;
         cpu.y = 0x55;
         cpu.stack_pointer = 0xFD;
         cpu.set_flag(StatusFlags::Zero);
-        
+
         let initial_status = cpu.get_status();
 
         let nop = NOP {};
@@ -1108,6 +1234,336 @@ mod tests {
         assert!(
             !cpu.is_flag_set(StatusFlags::Negative),
             "Negative flag should not be set for positive value"
+        );
+    }
+
+    #[test]
+    fn test_sta_zero_page() {
+        let mut cpu = CPU::new();
+        let mut rom = vec![0; 0xFFFE];
+
+        rom[0xFFFC] = 0x00;
+        rom[0xFFFD] = 0x80;
+
+        // STA $50 at address 0x8000
+        rom[0x8000] = 0x50; // Zero page address
+
+        cpu.insert_rom(rom);
+        cpu.program_counter = 0x8000;
+        cpu.accumulator = 0x42; // Value to store
+
+        let sta = STA {
+            addressing_mode: AddressingMode::ZeroPage,
+        };
+
+        sta.execute(&mut cpu, 3);
+
+        assert_eq!(
+            cpu.read_byte(0x0050),
+            0x42,
+            "Memory at zero page address should contain accumulator value"
+        );
+        assert_eq!(cpu.program_counter, 0x8001, "PC should increment by 1");
+        assert_eq!(cpu.accumulator, 0x42, "Accumulator should not change");
+    }
+
+    #[test]
+    fn test_sta_zero_page_x() {
+        let mut cpu = CPU::new();
+        let mut rom = vec![0; 0xFFFE];
+
+        rom[0xFFFC] = 0x00;
+        rom[0xFFFD] = 0x80;
+
+        // STA $50,X at address 0x8000
+        rom[0x8000] = 0x50; // Base zero page address
+
+        cpu.insert_rom(rom);
+        cpu.program_counter = 0x8000;
+        cpu.accumulator = 0x77;
+        cpu.x = 0x05; // X register offset
+
+        let sta = STA {
+            addressing_mode: AddressingMode::ZeroPageX,
+        };
+
+        sta.execute(&mut cpu, 4);
+
+        // Effective address should be 0x50 + 0x05 = 0x55
+        assert_eq!(
+            cpu.read_byte(0x0055),
+            0x77,
+            "Memory at zero page,X address should contain accumulator value"
+        );
+        assert_eq!(cpu.program_counter, 0x8001, "PC should increment by 1");
+        assert_eq!(cpu.accumulator, 0x77, "Accumulator should not change");
+    }
+
+    #[test]
+    fn test_sta_zero_page_x_wraparound() {
+        let mut cpu = CPU::new();
+        let mut rom = vec![0; 0xFFFE];
+
+        rom[0xFFFC] = 0x00;
+        rom[0xFFFD] = 0x80;
+
+        // STA $FF,X at address 0x8000
+        rom[0x8000] = 0xFF; // Base address near end of zero page
+
+        cpu.insert_rom(rom);
+        cpu.program_counter = 0x8000;
+        cpu.accumulator = 0x99;
+        cpu.x = 0x05; // This should wrap around within zero page
+
+        let sta = STA {
+            addressing_mode: AddressingMode::ZeroPageX,
+        };
+
+        sta.execute(&mut cpu, 4);
+
+        // Effective address should wrap: 0xFF + 0x05 = 0x04 (within zero page)
+        assert_eq!(
+            cpu.read_byte(0x0004),
+            0x99,
+            "Memory at wrapped zero page address should contain accumulator value"
+        );
+    }
+
+    #[test]
+    fn test_sta_absolute() {
+        let mut cpu = CPU::new();
+        let mut rom = vec![0; 0xFFFE];
+
+        rom[0xFFFC] = 0x00;
+        rom[0xFFFD] = 0x80;
+
+        // STA $1234 at address 0x8000
+        rom[0x8000] = 0x34; // Low byte of absolute address
+        rom[0x8001] = 0x12; // High byte of absolute address
+
+        cpu.insert_rom(rom);
+        cpu.program_counter = 0x8000;
+        cpu.accumulator = 0xAB;
+
+        let sta = STA {
+            addressing_mode: AddressingMode::Absolute,
+        };
+
+        sta.execute(&mut cpu, 4);
+
+        assert_eq!(
+            cpu.read_byte(0x1234),
+            0xAB,
+            "Memory at absolute address should contain accumulator value"
+        );
+        assert_eq!(cpu.program_counter, 0x8002, "PC should increment by 2");
+        assert_eq!(cpu.accumulator, 0xAB, "Accumulator should not change");
+    }
+
+    #[test]
+    fn test_sta_absolute_x() {
+        let mut cpu = CPU::new();
+        let mut rom = vec![0; 0xFFFE];
+
+        rom[0xFFFC] = 0x00;
+        rom[0xFFFD] = 0x80;
+
+        // STA $1200,X at address 0x8000
+        rom[0x8000] = 0x00; // Low byte
+        rom[0x8001] = 0x12; // High byte
+
+        cpu.insert_rom(rom);
+        cpu.program_counter = 0x8000;
+        cpu.accumulator = 0x55;
+        cpu.x = 0x10; // X register offset
+
+        let sta = STA {
+            addressing_mode: AddressingMode::AbsoluteX,
+        };
+
+        sta.execute(&mut cpu, 5);
+
+        // Effective address should be 0x1200 + 0x10 = 0x1210
+        assert_eq!(
+            cpu.read_byte(0x1210),
+            0x55,
+            "Memory at absolute,X address should contain accumulator value"
+        );
+        assert_eq!(cpu.program_counter, 0x8002, "PC should increment by 2");
+    }
+
+    #[test]
+    fn test_sta_absolute_y() {
+        let mut cpu = CPU::new();
+        let mut rom = vec![0; 0xFFFE];
+
+        rom[0xFFFC] = 0x00;
+        rom[0xFFFD] = 0x80;
+
+        // STA $1200,Y at address 0x8000
+        rom[0x8000] = 0x00; // Low byte
+        rom[0x8001] = 0x12; // High byte
+
+        cpu.insert_rom(rom);
+        cpu.program_counter = 0x8000;
+        cpu.accumulator = 0x88;
+        cpu.y = 0x20; // Y register offset
+
+        let sta = STA {
+            addressing_mode: AddressingMode::AbsoluteY,
+        };
+
+        sta.execute(&mut cpu, 5);
+
+        // Effective address should be 0x1200 + 0x20 = 0x1220
+        assert_eq!(
+            cpu.read_byte(0x1220),
+            0x88,
+            "Memory at absolute,Y address should contain accumulator value"
+        );
+        assert_eq!(cpu.program_counter, 0x8002, "PC should increment by 2");
+    }
+
+    #[test]
+    fn test_sta_pre_indexed_indirect() {
+        let mut cpu = CPU::new();
+        let mut rom = vec![0; 0xFFFE];
+
+        rom[0xFFFC] = 0x00;
+        rom[0xFFFD] = 0x80;
+
+        // STA ($50,X) at address 0x8000
+        rom[0x8000] = 0x50; // Base zero page address
+
+        cpu.insert_rom(rom);
+        cpu.program_counter = 0x8000;
+        cpu.accumulator = 0xCC;
+        cpu.x = 0x05; // X register offset
+
+        // Set up indirect address at 0x50 + 0x05 = 0x55
+        cpu.write_byte(0x0055, 0x34); // Low byte of target address
+        cpu.write_byte(0x0056, 0x12); // High byte of target address
+
+        let sta = STA {
+            addressing_mode: AddressingMode::PreIndexedIndirect,
+        };
+
+        sta.execute(&mut cpu, 6);
+
+        // Should store at address 0x1234
+        assert_eq!(
+            cpu.read_byte(0x1234),
+            0xCC,
+            "Memory at pre-indexed indirect address should contain accumulator value"
+        );
+        assert_eq!(cpu.program_counter, 0x8001, "PC should increment by 1");
+    }
+
+    #[test]
+    fn test_sta_post_indexed_indirect() {
+        let mut cpu = CPU::new();
+        let mut rom = vec![0; 0xFFFE];
+
+        rom[0xFFFC] = 0x00;
+        rom[0xFFFD] = 0x80;
+
+        // STA ($50),Y at address 0x8000
+        rom[0x8000] = 0x50; // Zero page address for indirect lookup
+
+        cpu.insert_rom(rom);
+        cpu.program_counter = 0x8000;
+        cpu.accumulator = 0xDD;
+        cpu.y = 0x10; // Y register offset
+
+        // Set up indirect address at 0x50
+        cpu.write_byte(0x0050, 0x00); // Low byte of base address
+        cpu.write_byte(0x0051, 0x12); // High byte of base address
+
+        let sta = STA {
+            addressing_mode: AddressingMode::PostIndexedIndirect,
+        };
+
+        sta.execute(&mut cpu, 6);
+
+        // Should store at address 0x1200 + 0x10 = 0x1210
+        assert_eq!(
+            cpu.read_byte(0x1210),
+            0xDD,
+            "Memory at post-indexed indirect address should contain accumulator value"
+        );
+        assert_eq!(cpu.program_counter, 0x8001, "PC should increment by 1");
+    }
+
+    #[test]
+    fn test_sta_timing() {
+        let mut cpu = CPU::new();
+        let mut rom = vec![0; 0xFFFE];
+
+        rom[0xFFFC] = 0x00;
+        rom[0xFFFD] = 0x80;
+        rom[0x8000] = 0x50; // Zero page address
+
+        cpu.insert_rom(rom);
+        cpu.program_counter = 0x8000;
+        cpu.accumulator = 0x42;
+
+        let sta = STA {
+            addressing_mode: AddressingMode::ZeroPage,
+        };
+
+        // Should not complete with insufficient ticks
+        let result = sta.execute(&mut cpu, 2);
+        assert!(!result, "STA should not complete with insufficient ticks");
+        assert_eq!(
+            cpu.program_counter, 0x8000,
+            "PC should not change when instruction doesn't complete"
+        );
+
+        // Should complete with sufficient ticks
+        let result = sta.execute(&mut cpu, 3);
+        assert!(result, "STA should complete with sufficient ticks");
+        assert_eq!(
+            cpu.read_byte(0x0050),
+            0x42,
+            "Memory should be updated after completion"
+        );
+    }
+
+    #[test]
+    fn test_sta_does_not_affect_flags() {
+        let mut cpu = CPU::new();
+        let mut rom = vec![0; 0xFFFE];
+
+        rom[0xFFFC] = 0x00;
+        rom[0xFFFD] = 0x80;
+        rom[0x8000] = 0x50; // Zero page address
+
+        cpu.insert_rom(rom);
+        cpu.program_counter = 0x8000;
+        cpu.accumulator = 0x00; // Zero value
+
+        // Set some flags before executing STA
+        cpu.set_flag(StatusFlags::Zero);
+        cpu.set_flag(StatusFlags::Negative);
+        cpu.set_flag(StatusFlags::Carry);
+        let initial_status = cpu.get_status();
+
+        let sta = STA {
+            addressing_mode: AddressingMode::ZeroPage,
+        };
+
+        sta.execute(&mut cpu, 3);
+
+        // STA should not affect any status flags
+        assert_eq!(
+            cpu.get_status(),
+            initial_status,
+            "STA should not modify any status flags"
+        );
+        assert_eq!(
+            cpu.read_byte(0x0050),
+            0x00,
+            "Memory should contain accumulator value"
         );
     }
 }
