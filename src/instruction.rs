@@ -1196,10 +1196,17 @@ mod tests {
         assert_eq!(cpu.x, 0x33, "X register should not change");
         assert_eq!(cpu.y, 0x55, "Y register should not change");
         assert_eq!(cpu.stack_pointer, 0xFD, "Stack pointer should not change");
-        assert_eq!(cpu.get_status(), initial_status, "Status flags should not change");
-        
+        assert_eq!(
+            cpu.get_status(),
+            initial_status,
+            "Status flags should not change"
+        );
+
         // PC should not change within the instruction (execute_rom handles PC increment)
-        assert_eq!(cpu.program_counter, 0x8000, "PC should not change within instruction");
+        assert_eq!(
+            cpu.program_counter, 0x8000,
+            "PC should not change within instruction"
+        );
     }
 
     #[test]
