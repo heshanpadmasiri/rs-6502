@@ -165,7 +165,12 @@ impl Instruction for LDA {
             AddressingMode::AbsoluteX => 4,
             AddressingMode::AbsoluteY if self.addressing_mode.is_crossing_page_boundary(cpu) => 5,
             AddressingMode::AbsoluteY => 4,
-            _ => panic!("Unsupported addressing mode for LDA"),
+            AddressingMode::PreIndexedIndirect => 6,
+            AddressingMode::PostIndexedIndirect => 5, // 5 cycles base, +1 if page boundary crossed
+            _ => panic!(
+                "Unsupported addressing mode for LDA: {:?}",
+                self.addressing_mode
+            ),
         };
         if current_tick < ticks {
             return false;
