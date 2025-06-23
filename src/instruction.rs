@@ -6,6 +6,8 @@ fn get_indirect_address(cpu: &CPU, indirect_addr: Address) -> Address {
     (high as u16) << 8 | low as u16
 }
 
+const SIGN_MASK: u8 = 0x80;
+
 #[derive(Debug)]
 pub enum AddressingMode {
     Immediate,
@@ -132,6 +134,13 @@ impl AddressingMode {
             }
             AddressingMode::AbsoluteY => {
                 is_crossing_page_boundary_inner(cpu.read_u16_from_rom(cpu.program_counter), cpu.y)
+            }
+            AddressingMode::PostIndexedIndirect => {
+                let addr = cpu.read_byte_from_rom(cpu.program_counter) as u16;
+                let low = cpu.read_byte(addr);
+                let high = cpu.read_byte(addr.wrapping_add(1));
+                let base_addr = (high as u16) << 8 | low as u16;
+                is_crossing_page_boundary_inner(base_addr, cpu.y)
             }
             _ => false,
         }
@@ -284,6 +293,97 @@ impl Instruction for JMP {
     }
 }
 
+pub struct ADC {
+    pub addressing_mode: AddressingMode,
+}
+
+impl Instruction for ADC {
+    fn execute(&self, cpu: &mut CPU, current_tick: u8) -> bool {
+        let ticks = match self.addressing_mode {
+            AddressingMode::Immediate => 2,
+            AddressingMode::ZeroPage => 3,
+            AddressingMode::ZeroPageX => 4,
+            AddressingMode::Absolute => 4,
+            AddressingMode::AbsoluteX if self.addressing_mode.is_crossing_page_boundary(cpu) => 5,
+            AddressingMode::AbsoluteX => 4,
+            AddressingMode::AbsoluteY if self.addressing_mode.is_crossing_page_boundary(cpu) => 5,
+            AddressingMode::AbsoluteY => 4,
+            AddressingMode::PreIndexedIndirect => 6,
+            AddressingMode::PostIndexedIndirect => {
+                if self.addressing_mode.is_crossing_page_boundary(cpu) {
+                    6
+                } else {
+                    5
+                }
+            }
+            _ => panic!(
+                "Unsupported addressing mode for ADC: {:?}",
+                self.addressing_mode
+            ),
+        };
+
+        if current_tick < ticks {
+            return false;
+        }
+
+        let value = self.addressing_mode.load_value(cpu);
+        let pc_increment = self.addressing_mode.program_counter_increment();
+        cpu.program_counter += pc_increment;
+
+        let carry_bit = if cpu.is_flag_set(StatusFlags::Carry) {
+            1
+        } else {
+            0
+        };
+        let result = cpu.accumulator as u16 + value as u16 + carry_bit;
+
+        if result > 255 {
+            cpu.set_flag(StatusFlags::Carry);
+        } else {
+            cpu.reset_flag(StatusFlags::Carry);
+        }
+
+        if is_overflowing_addition(cpu.accumulator, value, result) {
+            cpu.set_flag(StatusFlags::Overflow);
+        } else {
+            cpu.reset_flag(StatusFlags::Overflow);
+        }
+
+        cpu.accumulator = result as u8;
+
+        update_zero_flag(cpu);
+        update_neg_flag(cpu);
+
+        true
+    }
+}
+
+fn update_zero_flag(cpu: &mut CPU) {
+    if cpu.accumulator == 0 {
+        cpu.set_flag(StatusFlags::Zero);
+    } else {
+        cpu.reset_flag(StatusFlags::Zero);
+    }
+}
+
+fn update_neg_flag(cpu: &mut CPU) {
+    if cpu.accumulator & SIGN_MASK != 0 {
+        cpu.set_flag(StatusFlags::Negative);
+    } else {
+        cpu.reset_flag(StatusFlags::Negative);
+    }
+}
+
+fn is_overflowing_addition(operand1: u8, operand2: u8, result: u16) -> bool {
+    let operand1_sign = (operand1 & SIGN_MASK) != 0;
+    let operand2_sign = (operand2 & SIGN_MASK) != 0;
+    let result_sign = (result & (SIGN_MASK as u16)) != 0;
+
+    // Overflow occurs when adding two positive numbers gives negative result,
+    // or adding two negative numbers gives positive result
+    (operand1_sign == operand2_sign) && (operand1_sign != result_sign)
+}
+
 pub fn init_op_table() -> [Option<Box<dyn Instruction>>; 256] {
     struct InstructionData {
         instruction: Box<dyn Instruction>,
@@ -399,6 +499,54 @@ pub fn init_op_table() -> [Option<Box<dyn Instruction>>; 256] {
                 addressing_mode: AddressingMode::Indirect,
             }),
             opc: 0x6C,
+        },
+        InstructionData {
+            instruction: Box::new(ADC {
+                addressing_mode: AddressingMode::Immediate,
+            }),
+            opc: 0x69,
+        },
+        InstructionData {
+            instruction: Box::new(ADC {
+                addressing_mode: AddressingMode::ZeroPage,
+            }),
+            opc: 0x65,
+        },
+        InstructionData {
+            instruction: Box::new(ADC {
+                addressing_mode: AddressingMode::ZeroPageX,
+            }),
+            opc: 0x75,
+        },
+        InstructionData {
+            instruction: Box::new(ADC {
+                addressing_mode: AddressingMode::Absolute,
+            }),
+            opc: 0x6D,
+        },
+        InstructionData {
+            instruction: Box::new(ADC {
+                addressing_mode: AddressingMode::AbsoluteX,
+            }),
+            opc: 0x7D,
+        },
+        InstructionData {
+            instruction: Box::new(ADC {
+                addressing_mode: AddressingMode::AbsoluteY,
+            }),
+            opc: 0x79,
+        },
+        InstructionData {
+            instruction: Box::new(ADC {
+                addressing_mode: AddressingMode::PreIndexedIndirect,
+            }),
+            opc: 0x61,
+        },
+        InstructionData {
+            instruction: Box::new(ADC {
+                addressing_mode: AddressingMode::PostIndexedIndirect,
+            }),
+            opc: 0x71,
         },
     ];
     let mut op_table: [Option<Box<dyn Instruction>>; 256] = core::array::from_fn(|_| None);
@@ -1532,6 +1680,7 @@ mod tests {
         // Set up indirect address at 0x50
         cpu.write_byte(0x0050, 0x00); // Low byte of base address
         cpu.write_byte(0x0051, 0x12); // High byte of base address
+        cpu.write_byte(0x1210, 0x66); // Value at address 0x1200 + 0x10 = 0x1210
 
         let sta = STA {
             addressing_mode: AddressingMode::PostIndexedIndirect,
@@ -1539,7 +1688,6 @@ mod tests {
 
         sta.execute(&mut cpu, 6);
 
-        // Should store at address 0x1200 + 0x10 = 0x1210
         assert_eq!(
             cpu.read_byte(0x1210),
             0xDD,
@@ -1737,7 +1885,10 @@ mod tests {
 
         // Should not complete with insufficient ticks
         let result = jmp.execute(&mut cpu, 4);
-        assert!(!result, "JMP indirect should not complete with insufficient ticks");
+        assert!(
+            !result,
+            "JMP indirect should not complete with insufficient ticks"
+        );
         assert_eq!(
             cpu.program_counter, 0x8000,
             "PC should not change when instruction doesn't complete"
@@ -1819,7 +1970,10 @@ mod tests {
         assert_eq!(cpu.x, 0x33, "X register should not change");
         assert_eq!(cpu.y, 0x55, "Y register should not change");
         assert_eq!(cpu.stack_pointer, 0xFD, "Stack pointer should not change");
-        assert_eq!(cpu.program_counter, 0x1234, "PC should jump to target address");
+        assert_eq!(
+            cpu.program_counter, 0x1234,
+            "PC should jump to target address"
+        );
     }
 
     #[test]
@@ -1993,6 +2147,580 @@ mod tests {
         assert_eq!(
             cpu.program_counter, 0x8000,
             "PC should jump back to 0x8000 through indirect addressing"
+        );
+    }
+
+    #[test]
+    fn test_adc_immediate_basic() {
+        let mut cpu = CPU::new();
+        let mut rom = vec![0; 0xFFFE];
+
+        rom[0xFFFC] = 0x00;
+        rom[0xFFFD] = 0x80;
+
+        // ADC #$30 at address 0x8000
+        rom[0x8000] = 0x30; // Value to add
+
+        cpu.insert_rom(rom);
+        cpu.program_counter = 0x8000;
+        cpu.accumulator = 0x10; // Initial accumulator value
+
+        let adc = ADC {
+            addressing_mode: AddressingMode::Immediate,
+        };
+
+        adc.execute(&mut cpu, 2);
+
+        assert_eq!(
+            cpu.accumulator, 0x40,
+            "Accumulator should contain 0x10 + 0x30 = 0x40"
+        );
+        assert!(
+            !cpu.is_flag_set(StatusFlags::Carry),
+            "Carry flag should not be set"
+        );
+        assert!(
+            !cpu.is_flag_set(StatusFlags::Zero),
+            "Zero flag should not be set"
+        );
+        assert!(
+            !cpu.is_flag_set(StatusFlags::Negative),
+            "Negative flag should not be set"
+        );
+        assert!(
+            !cpu.is_flag_set(StatusFlags::Overflow),
+            "Overflow flag should not be set"
+        );
+        assert_eq!(cpu.program_counter, 0x8001, "PC should increment by 1");
+    }
+
+    #[test]
+    fn test_adc_immediate_with_carry() {
+        let mut cpu = CPU::new();
+        let mut rom = vec![0; 0xFFFE];
+
+        rom[0xFFFC] = 0x00;
+        rom[0xFFFD] = 0x80;
+        rom[0x8000] = 0x30;
+
+        cpu.insert_rom(rom);
+        cpu.program_counter = 0x8000;
+        cpu.accumulator = 0x10;
+        cpu.set_flag(StatusFlags::Carry); // Set carry flag
+
+        let adc = ADC {
+            addressing_mode: AddressingMode::Immediate,
+        };
+
+        adc.execute(&mut cpu, 2);
+
+        assert_eq!(
+            cpu.accumulator, 0x41,
+            "Accumulator should contain 0x10 + 0x30 + 1 = 0x41"
+        );
+        assert!(
+            !cpu.is_flag_set(StatusFlags::Carry),
+            "Carry flag should be cleared"
+        );
+    }
+
+    #[test]
+    fn test_adc_immediate_carry_out() {
+        let mut cpu = CPU::new();
+        let mut rom = vec![0; 0xFFFE];
+
+        rom[0xFFFC] = 0x00;
+        rom[0xFFFD] = 0x80;
+        rom[0x8000] = 0x01;
+
+        cpu.insert_rom(rom);
+        cpu.program_counter = 0x8000;
+        cpu.accumulator = 0xFF; // Will cause carry out
+
+        let adc = ADC {
+            addressing_mode: AddressingMode::Immediate,
+        };
+
+        adc.execute(&mut cpu, 2);
+
+        assert_eq!(cpu.accumulator, 0x00, "Accumulator should wrap to 0x00");
+        assert!(
+            cpu.is_flag_set(StatusFlags::Carry),
+            "Carry flag should be set"
+        );
+        assert!(
+            cpu.is_flag_set(StatusFlags::Zero),
+            "Zero flag should be set"
+        );
+        assert!(
+            !cpu.is_flag_set(StatusFlags::Negative),
+            "Negative flag should not be set"
+        );
+        assert!(
+            !cpu.is_flag_set(StatusFlags::Overflow),
+            "Overflow flag should not be set"
+        );
+    }
+
+    #[test]
+    fn test_adc_immediate_overflow_positive() {
+        let mut cpu = CPU::new();
+        let mut rom = vec![0; 0xFFFE];
+
+        rom[0xFFFC] = 0x00;
+        rom[0xFFFD] = 0x80;
+        rom[0x8000] = 0x01;
+
+        cpu.insert_rom(rom);
+        cpu.program_counter = 0x8000;
+        cpu.accumulator = 0x7F; // Adding 1 to 127 causes signed overflow
+
+        let adc = ADC {
+            addressing_mode: AddressingMode::Immediate,
+        };
+
+        adc.execute(&mut cpu, 2);
+
+        assert_eq!(cpu.accumulator, 0x80, "Result should be 0x80");
+        assert!(
+            !cpu.is_flag_set(StatusFlags::Carry),
+            "Carry flag should not be set"
+        );
+        assert!(
+            !cpu.is_flag_set(StatusFlags::Zero),
+            "Zero flag should not be set"
+        );
+        assert!(
+            cpu.is_flag_set(StatusFlags::Negative),
+            "Negative flag should be set"
+        );
+        assert!(
+            cpu.is_flag_set(StatusFlags::Overflow),
+            "Overflow flag should be set"
+        );
+    }
+
+    #[test]
+    fn test_adc_immediate_overflow_negative() {
+        let mut cpu = CPU::new();
+        let mut rom = vec![0; 0xFFFE];
+
+        rom[0xFFFC] = 0x00;
+        rom[0xFFFD] = 0x80;
+        rom[0x8000] = 0xFF; // -1 in signed 8-bit
+
+        cpu.insert_rom(rom);
+        cpu.program_counter = 0x8000;
+        cpu.accumulator = 0x80; // -128 in signed 8-bit
+
+        let adc = ADC {
+            addressing_mode: AddressingMode::Immediate,
+        };
+
+        adc.execute(&mut cpu, 2);
+
+        assert_eq!(cpu.accumulator, 0x7F, "Result should be 0x7F");
+        assert!(
+            cpu.is_flag_set(StatusFlags::Carry),
+            "Carry flag should be set"
+        );
+        assert!(
+            !cpu.is_flag_set(StatusFlags::Zero),
+            "Zero flag should not be set"
+        );
+        assert!(
+            !cpu.is_flag_set(StatusFlags::Negative),
+            "Negative flag should not be set"
+        );
+        assert!(
+            cpu.is_flag_set(StatusFlags::Overflow),
+            "Overflow flag should be set"
+        );
+    }
+
+    #[test]
+    fn test_adc_zero_page() {
+        let mut cpu = CPU::new();
+        let mut rom = vec![0; 0xFFFE];
+
+        rom[0xFFFC] = 0x00;
+        rom[0xFFFD] = 0x80;
+        rom[0x8000] = 0x50; // Zero page address
+
+        cpu.insert_rom(rom);
+        cpu.program_counter = 0x8000;
+        cpu.accumulator = 0x20;
+        cpu.write_byte(0x0050, 0x15); // Value at zero page address
+
+        let adc = ADC {
+            addressing_mode: AddressingMode::ZeroPage,
+        };
+
+        adc.execute(&mut cpu, 3);
+
+        assert_eq!(
+            cpu.accumulator, 0x35,
+            "Accumulator should contain 0x20 + 0x15 = 0x35"
+        );
+        assert_eq!(cpu.program_counter, 0x8001, "PC should increment by 1");
+    }
+
+    #[test]
+    fn test_adc_zero_page_x() {
+        let mut cpu = CPU::new();
+        let mut rom = vec![0; 0xFFFE];
+
+        rom[0xFFFC] = 0x00;
+        rom[0xFFFD] = 0x80;
+        rom[0x8000] = 0x50; // Base zero page address
+
+        cpu.insert_rom(rom);
+        cpu.program_counter = 0x8000;
+        cpu.accumulator = 0x25;
+        cpu.x = 0x05; // X register offset
+        cpu.write_byte(0x0055, 0x1A); // Value at effective address 0x50 + 0x05 = 0x55
+
+        let adc = ADC {
+            addressing_mode: AddressingMode::ZeroPageX,
+        };
+
+        adc.execute(&mut cpu, 4);
+
+        assert_eq!(
+            cpu.accumulator, 0x3F,
+            "Accumulator should contain 0x25 + 0x1A = 0x3F"
+        );
+    }
+
+    #[test]
+    fn test_adc_absolute() {
+        let mut cpu = CPU::new();
+        let mut rom = vec![0; 0xFFFE];
+
+        rom[0xFFFC] = 0x00;
+        rom[0xFFFD] = 0x80;
+        rom[0x8000] = 0x34; // Low byte of absolute address
+        rom[0x8001] = 0x12; // High byte of absolute address
+
+        cpu.insert_rom(rom);
+        cpu.program_counter = 0x8000;
+        cpu.accumulator = 0x40;
+        cpu.write_byte(0x1234, 0x30); // Value at absolute address
+
+        let adc = ADC {
+            addressing_mode: AddressingMode::Absolute,
+        };
+
+        adc.execute(&mut cpu, 4);
+
+        assert_eq!(
+            cpu.accumulator, 0x70,
+            "Accumulator should contain 0x40 + 0x30 = 0x70"
+        );
+        assert_eq!(cpu.program_counter, 0x8002, "PC should increment by 2");
+    }
+
+    #[test]
+    fn test_adc_absolute_x_no_page_boundary() {
+        let mut cpu = CPU::new();
+        let mut rom = vec![0; 0xFFFE];
+
+        rom[0xFFFC] = 0x00;
+        rom[0xFFFD] = 0x80;
+        rom[0x8000] = 0x00; // Low byte
+        rom[0x8001] = 0x12; // High byte
+
+        cpu.insert_rom(rom);
+        cpu.program_counter = 0x8000;
+        cpu.accumulator = 0x11;
+        cpu.x = 0x10; // X register offset (no page boundary crossing)
+        cpu.write_byte(0x1210, 0x22); // Value at effective address 0x1200 + 0x10 = 0x1210
+
+        let adc = ADC {
+            addressing_mode: AddressingMode::AbsoluteX,
+        };
+
+        adc.execute(&mut cpu, 4); // 4 cycles when no page boundary crossed
+
+        assert_eq!(
+            cpu.accumulator, 0x33,
+            "Accumulator should contain 0x11 + 0x22 = 0x33"
+        );
+    }
+
+    #[test]
+    fn test_adc_absolute_x_page_boundary_crossing() {
+        let mut cpu = CPU::new();
+        let mut rom = vec![0; 0xFFFE];
+
+        rom[0xFFFC] = 0x00;
+        rom[0xFFFD] = 0x80;
+        rom[0x8000] = 0xFF; // Low byte
+        rom[0x8001] = 0x12; // High byte
+
+        cpu.insert_rom(rom);
+        cpu.program_counter = 0x8000;
+        cpu.accumulator = 0x44;
+        cpu.x = 0x05; // This will cross page boundary: 0x12FF + 0x05 = 0x1304
+        cpu.write_byte(0x1304, 0x33); // Value at effective address
+
+        let adc = ADC {
+            addressing_mode: AddressingMode::AbsoluteX,
+        };
+
+        adc.execute(&mut cpu, 5); // 5 cycles when page boundary crossed
+
+        assert_eq!(
+            cpu.accumulator, 0x77,
+            "Accumulator should contain 0x44 + 0x33 = 0x77"
+        );
+    }
+
+    #[test]
+    fn test_adc_absolute_y() {
+        let mut cpu = CPU::new();
+        let mut rom = vec![0; 0xFFFE];
+
+        rom[0xFFFC] = 0x00;
+        rom[0xFFFD] = 0x80;
+        rom[0x8000] = 0x00; // Low byte
+        rom[0x8001] = 0x12; // High byte of absolute address
+
+        cpu.insert_rom(rom);
+        cpu.program_counter = 0x8000;
+        cpu.accumulator = 0x55;
+        cpu.y = 0x20; // Y register offset
+        cpu.write_byte(0x1220, 0x11); // Value at effective address 0x1200 + 0x20 = 0x1220
+
+        let adc = ADC {
+            addressing_mode: AddressingMode::AbsoluteY,
+        };
+
+        adc.execute(&mut cpu, 4);
+
+        assert_eq!(
+            cpu.accumulator, 0x66,
+            "Accumulator should contain 0x55 + 0x11 = 0x66"
+        );
+    }
+
+    #[test]
+    fn test_adc_pre_indexed_indirect() {
+        let mut cpu = CPU::new();
+        let mut rom = vec![0; 0xFFFE];
+
+        rom[0xFFFC] = 0x00;
+        rom[0xFFFD] = 0x80;
+        rom[0x8000] = 0x50; // Base zero page address
+
+        cpu.insert_rom(rom);
+        cpu.program_counter = 0x8000;
+        cpu.accumulator = 0x88;
+        cpu.x = 0x05; // X register offset
+
+        // Set up indirect address at 0x50 + 0x05 = 0x55
+        cpu.write_byte(0x0055, 0x34); // Low byte of target address
+        cpu.write_byte(0x0056, 0x12); // High byte of target address
+        cpu.write_byte(0x1234, 0x77); // Value at target address
+
+        let adc = ADC {
+            addressing_mode: AddressingMode::PreIndexedIndirect,
+        };
+
+        adc.execute(&mut cpu, 6);
+
+        assert_eq!(
+            cpu.accumulator, 0xFF,
+            "Accumulator should contain 0x88 + 0x77 = 0xFF"
+        );
+        assert_eq!(cpu.program_counter, 0x8001, "PC should increment by 1");
+    }
+
+    #[test]
+    fn test_adc_post_indexed_indirect() {
+        let mut cpu = CPU::new();
+        let mut rom = vec![0; 0xFFFE];
+
+        rom[0xFFFC] = 0x00;
+        rom[0xFFFD] = 0x80;
+        rom[0x8000] = 0x50; // Zero page address for indirect lookup
+
+        cpu.insert_rom(rom);
+        cpu.program_counter = 0x8000;
+        cpu.accumulator = 0x99;
+        cpu.y = 0x10; // Y register offset
+
+        // Set up indirect address at 0x50
+        cpu.write_byte(0x0050, 0x00); // Low byte of base address
+        cpu.write_byte(0x0051, 0x12); // High byte of base address
+        cpu.write_byte(0x1210, 0x66); // Value at address 0x1200 + 0x10 = 0x1210
+
+        let adc = ADC {
+            addressing_mode: AddressingMode::PostIndexedIndirect,
+        };
+
+        adc.execute(&mut cpu, 5);
+
+        assert_eq!(
+            cpu.accumulator, 0xFF,
+            "Accumulator should contain 0x99 + 0x66 = 0xFF"
+        );
+        assert_eq!(cpu.program_counter, 0x8001, "PC should increment by 1");
+    }
+
+    #[test]
+    fn test_adc_timing() {
+        let mut cpu = CPU::new();
+        let mut rom = vec![0; 0xFFFE];
+
+        rom[0xFFFC] = 0x00;
+        rom[0xFFFD] = 0x80;
+        rom[0x8000] = 0x42;
+
+        cpu.insert_rom(rom);
+        cpu.program_counter = 0x8000;
+        cpu.accumulator = 0x10;
+
+        let adc = ADC {
+            addressing_mode: AddressingMode::Immediate,
+        };
+
+        // Should not complete with insufficient ticks
+        let result = adc.execute(&mut cpu, 1);
+        assert!(!result, "ADC should not complete with insufficient ticks");
+        assert_eq!(
+            cpu.accumulator, 0x10,
+            "Accumulator should not change with insufficient ticks"
+        );
+
+        // Should complete with sufficient ticks
+        let result = adc.execute(&mut cpu, 2);
+        assert!(result, "ADC should complete with sufficient ticks");
+        assert_eq!(
+            cpu.accumulator, 0x52,
+            "Accumulator should change with sufficient ticks"
+        );
+    }
+
+    #[test]
+    fn test_adc_flag_combinations() {
+        let mut cpu = CPU::new();
+        let mut rom = vec![0; 0xFFFE];
+
+        rom[0xFFFC] = 0x00;
+        rom[0xFFFD] = 0x80;
+        rom[0x8000] = 0x00; // Adding zero
+
+        cpu.insert_rom(rom);
+        cpu.program_counter = 0x8000;
+        cpu.accumulator = 0x00; // Zero accumulator
+        cpu.set_flag(StatusFlags::Carry); // Set carry
+
+        let adc = ADC {
+            addressing_mode: AddressingMode::Immediate,
+        };
+
+        adc.execute(&mut cpu, 2);
+
+        // 0x00 + 0x00 + 1 (carry) = 0x01
+        assert_eq!(cpu.accumulator, 0x01, "Result should be 0x01");
+        assert!(
+            !cpu.is_flag_set(StatusFlags::Carry),
+            "Carry flag should be cleared"
+        );
+        assert!(
+            !cpu.is_flag_set(StatusFlags::Zero),
+            "Zero flag should not be set"
+        );
+        assert!(
+            !cpu.is_flag_set(StatusFlags::Negative),
+            "Negative flag should not be set"
+        );
+        assert!(
+            !cpu.is_flag_set(StatusFlags::Overflow),
+            "Overflow flag should not be set"
+        );
+    }
+
+    #[test]
+    fn test_adc_negative_flag() {
+        let mut cpu = CPU::new();
+        let mut rom = vec![0; 0xFFFE];
+
+        rom[0xFFFC] = 0x00;
+        rom[0xFFFD] = 0x80;
+        rom[0x8000] = 0x10; // Add positive number to negative accumulator
+
+        cpu.insert_rom(rom);
+        cpu.program_counter = 0x8000;
+        cpu.accumulator = 0x80; // Start with negative number (-128)
+
+        let adc = ADC {
+            addressing_mode: AddressingMode::Immediate,
+        };
+
+        adc.execute(&mut cpu, 2);
+
+        // 0x80 (-128) + 0x10 (16) = 0x90 (-112) - no overflow, just negative result
+        assert_eq!(cpu.accumulator, 0x90, "Result should be 0x90");
+        assert!(
+            !cpu.is_flag_set(StatusFlags::Carry),
+            "Carry flag should not be set"
+        );
+        assert!(
+            !cpu.is_flag_set(StatusFlags::Zero),
+            "Zero flag should not be set"
+        );
+        assert!(
+            cpu.is_flag_set(StatusFlags::Negative),
+            "Negative flag should be set"
+        );
+        assert!(
+            !cpu.is_flag_set(StatusFlags::Overflow),
+            "Overflow flag should not be set"
+        );
+    }
+
+    #[test]
+    fn test_adc_multiple_operations() {
+        let mut cpu = CPU::new();
+        let mut rom = vec![0; 0xFFFE];
+
+        rom[0xFFFC] = 0x00;
+        rom[0xFFFD] = 0x80;
+        rom[0x8000] = 0x20; // First ADC immediate value
+        rom[0x8001] = 0xE0; // Second ADC immediate value
+
+        cpu.insert_rom(rom);
+        cpu.program_counter = 0x8000;
+        cpu.accumulator = 0x10;
+
+        // First ADC with immediate value 0x20
+        let adc1 = ADC {
+            addressing_mode: AddressingMode::Immediate,
+        };
+        adc1.execute(&mut cpu, 2);
+
+        assert_eq!(cpu.accumulator, 0x30, "First ADC: 0x10 + 0x20 = 0x30");
+        assert!(
+            !cpu.is_flag_set(StatusFlags::Carry),
+            "No carry after first ADC"
+        );
+
+        // Second ADC with immediate value 0xE0 (should cause carry)
+        cpu.program_counter = 0x8001;
+        let adc2 = ADC {
+            addressing_mode: AddressingMode::Immediate,
+        };
+        adc2.execute(&mut cpu, 2);
+
+        assert_eq!(
+            cpu.accumulator, 0x10,
+            "Second ADC: 0x30 + 0xE0 = 0x10 (with carry)"
+        );
+        assert!(
+            cpu.is_flag_set(StatusFlags::Carry),
+            "Carry should be set after second ADC"
         );
     }
 }
