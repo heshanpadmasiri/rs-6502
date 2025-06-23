@@ -1,5 +1,11 @@
 use crate::cpu::{Address, CPU, StatusFlags};
 
+fn get_indirect_address(cpu: &CPU, indirect_addr: Address) -> Address {
+    let low = cpu.read_byte(indirect_addr);
+    let high = cpu.read_byte(indirect_addr.wrapping_add(1));
+    (high as u16) << 8 | low as u16
+}
+
 #[derive(Debug)]
 pub enum AddressingMode {
     Immediate,
@@ -50,6 +56,10 @@ impl AddressingMode {
                 let addr = (high as u16) << 8 | low as u16;
                 addr.wrapping_add(cpu.y as u16)
             }
+            AddressingMode::Indirect => {
+                let indirect_addr = cpu.read_u16_from_rom(cpu.program_counter);
+                get_indirect_address(cpu, indirect_addr)
+            }
             _ => panic!("Unsupported addressing mode for target_address: {:?}", self),
         }
     }
@@ -86,10 +96,8 @@ impl AddressingMode {
                 cpu.read_byte(addr)
             }
             AddressingMode::Indirect => {
-                let addr = cpu.read_u16_from_rom(cpu.program_counter);
-                let low = cpu.read_byte(addr);
-                let high = cpu.read_byte(addr.wrapping_add(1));
-                let effective_addr = (high as u16) << 8 | low as u16;
+                let indirect_addr = cpu.read_u16_from_rom(cpu.program_counter);
+                let effective_addr = get_indirect_address(cpu, indirect_addr);
                 cpu.read_byte(effective_addr)
             }
             AddressingMode::PreIndexedIndirect => {
@@ -253,7 +261,29 @@ impl Instruction for NOP {
     }
 }
 
-// TODO: move this to instructions and give better name
+pub struct JMP {
+    pub addressing_mode: AddressingMode,
+}
+
+impl Instruction for JMP {
+    fn execute(&self, cpu: &mut CPU, current_tick: u8) -> bool {
+        let ticks = match self.addressing_mode {
+            AddressingMode::Absolute => 3,
+            AddressingMode::Indirect => 5,
+            _ => panic!(
+                "Unsupported addressing mode for JMP: {:?}",
+                self.addressing_mode
+            ),
+        };
+        if current_tick < ticks {
+            return false;
+        }
+        let target_address = self.addressing_mode.target_address(cpu);
+        cpu.program_counter = target_address;
+        true
+    }
+}
+
 pub fn init_op_table() -> [Option<Box<dyn Instruction>>; 256] {
     struct InstructionData {
         instruction: Box<dyn Instruction>,
@@ -357,6 +387,18 @@ pub fn init_op_table() -> [Option<Box<dyn Instruction>>; 256] {
                 addressing_mode: AddressingMode::PostIndexedIndirect,
             }),
             opc: 0x91,
+        },
+        InstructionData {
+            instruction: Box::new(JMP {
+                addressing_mode: AddressingMode::Absolute,
+            }),
+            opc: 0x4C,
+        },
+        InstructionData {
+            instruction: Box::new(JMP {
+                addressing_mode: AddressingMode::Indirect,
+            }),
+            opc: 0x6C,
         },
     ];
     let mut op_table: [Option<Box<dyn Instruction>>; 256] = core::array::from_fn(|_| None);
@@ -1576,6 +1618,381 @@ mod tests {
             cpu.read_byte(0x0050),
             0x00,
             "Memory should contain accumulator value"
+        );
+    }
+
+    #[test]
+    fn test_jmp_absolute() {
+        let mut cpu = CPU::new();
+        let mut rom = vec![0; 0xFFFE];
+
+        rom[0xFFFC] = 0x00;
+        rom[0xFFFD] = 0x80;
+
+        // JMP $1234 at address 0x8000
+        rom[0x8000] = 0x34; // Low byte of target address
+        rom[0x8001] = 0x12; // High byte of target address
+
+        cpu.insert_rom(rom);
+        cpu.program_counter = 0x8000;
+
+        let jmp = JMP {
+            addressing_mode: AddressingMode::Absolute,
+        };
+
+        jmp.execute(&mut cpu, 3);
+
+        assert_eq!(
+            cpu.program_counter, 0x1234,
+            "PC should jump to absolute address 0x1234"
+        );
+    }
+
+    #[test]
+    fn test_jmp_absolute_timing() {
+        let mut cpu = CPU::new();
+        let mut rom = vec![0; 0xFFFE];
+
+        rom[0xFFFC] = 0x00;
+        rom[0xFFFD] = 0x80;
+        rom[0x8000] = 0x34;
+        rom[0x8001] = 0x12;
+
+        cpu.insert_rom(rom);
+        cpu.program_counter = 0x8000;
+
+        let jmp = JMP {
+            addressing_mode: AddressingMode::Absolute,
+        };
+
+        // Should not complete with insufficient ticks
+        let result = jmp.execute(&mut cpu, 2);
+        assert!(!result, "JMP should not complete with insufficient ticks");
+        assert_eq!(
+            cpu.program_counter, 0x8000,
+            "PC should not change when instruction doesn't complete"
+        );
+
+        // Should complete with sufficient ticks
+        let result = jmp.execute(&mut cpu, 3);
+        assert!(result, "JMP should complete with sufficient ticks");
+        assert_eq!(
+            cpu.program_counter, 0x1234,
+            "PC should jump to target address after completion"
+        );
+    }
+
+    #[test]
+    fn test_jmp_indirect() {
+        let mut cpu = CPU::new();
+        let mut rom = vec![0; 0xFFFE];
+
+        rom[0xFFFC] = 0x00;
+        rom[0xFFFD] = 0x80;
+
+        // JMP ($1000) at address 0x8000
+        rom[0x8000] = 0x00; // Low byte of indirect address
+        rom[0x8001] = 0x10; // High byte of indirect address
+
+        cpu.insert_rom(rom);
+        cpu.program_counter = 0x8000;
+
+        // Set up target address at indirect location 0x1000
+        cpu.write_byte(0x1000, 0x78); // Low byte of target address
+        cpu.write_byte(0x1001, 0x56); // High byte of target address
+
+        let jmp = JMP {
+            addressing_mode: AddressingMode::Indirect,
+        };
+
+        jmp.execute(&mut cpu, 5);
+
+        // Should jump to address 0x5678 (little-endian)
+        assert_eq!(
+            cpu.program_counter, 0x5678,
+            "PC should jump to indirect target address 0x5678"
+        );
+    }
+
+    #[test]
+    fn test_jmp_indirect_timing() {
+        let mut cpu = CPU::new();
+        let mut rom = vec![0; 0xFFFE];
+
+        rom[0xFFFC] = 0x00;
+        rom[0xFFFD] = 0x80;
+        rom[0x8000] = 0x00;
+        rom[0x8001] = 0x10;
+
+        cpu.insert_rom(rom);
+        cpu.program_counter = 0x8000;
+
+        // Set up target address
+        cpu.write_byte(0x1000, 0x78);
+        cpu.write_byte(0x1001, 0x56);
+
+        let jmp = JMP {
+            addressing_mode: AddressingMode::Indirect,
+        };
+
+        // Should not complete with insufficient ticks
+        let result = jmp.execute(&mut cpu, 4);
+        assert!(!result, "JMP indirect should not complete with insufficient ticks");
+        assert_eq!(
+            cpu.program_counter, 0x8000,
+            "PC should not change when instruction doesn't complete"
+        );
+
+        // Should complete with sufficient ticks
+        let result = jmp.execute(&mut cpu, 5);
+        assert!(result, "JMP indirect should complete with sufficient ticks");
+        assert_eq!(
+            cpu.program_counter, 0x5678,
+            "PC should jump to indirect target address after completion"
+        );
+    }
+
+    #[test]
+    fn test_jmp_does_not_affect_flags() {
+        let mut cpu = CPU::new();
+        let mut rom = vec![0; 0xFFFE];
+
+        rom[0xFFFC] = 0x00;
+        rom[0xFFFD] = 0x80;
+        rom[0x8000] = 0x34;
+        rom[0x8001] = 0x12;
+
+        cpu.insert_rom(rom);
+        cpu.program_counter = 0x8000;
+
+        // Set some flags before executing JMP
+        cpu.set_flag(StatusFlags::Zero);
+        cpu.set_flag(StatusFlags::Negative);
+        cpu.set_flag(StatusFlags::Carry);
+        let initial_status = cpu.get_status();
+
+        let jmp = JMP {
+            addressing_mode: AddressingMode::Absolute,
+        };
+
+        jmp.execute(&mut cpu, 3);
+
+        // JMP should not affect any status flags
+        assert_eq!(
+            cpu.get_status(),
+            initial_status,
+            "JMP should not modify any status flags"
+        );
+        assert_eq!(
+            cpu.program_counter, 0x1234,
+            "PC should jump to target address"
+        );
+    }
+
+    #[test]
+    fn test_jmp_does_not_affect_registers() {
+        let mut cpu = CPU::new();
+        let mut rom = vec![0; 0xFFFE];
+
+        rom[0xFFFC] = 0x00;
+        rom[0xFFFD] = 0x80;
+        rom[0x8000] = 0x34;
+        rom[0x8001] = 0x12;
+
+        cpu.insert_rom(rom);
+        cpu.program_counter = 0x8000;
+
+        // Set initial register values
+        cpu.accumulator = 0x42;
+        cpu.x = 0x33;
+        cpu.y = 0x55;
+        cpu.stack_pointer = 0xFD;
+
+        let jmp = JMP {
+            addressing_mode: AddressingMode::Absolute,
+        };
+
+        jmp.execute(&mut cpu, 3);
+
+        // JMP should not affect any registers
+        assert_eq!(cpu.accumulator, 0x42, "Accumulator should not change");
+        assert_eq!(cpu.x, 0x33, "X register should not change");
+        assert_eq!(cpu.y, 0x55, "Y register should not change");
+        assert_eq!(cpu.stack_pointer, 0xFD, "Stack pointer should not change");
+        assert_eq!(cpu.program_counter, 0x1234, "PC should jump to target address");
+    }
+
+    #[test]
+    fn test_jmp_absolute_edge_cases() {
+        let mut cpu = CPU::new();
+        let mut rom = vec![0; 0xFFFE];
+
+        rom[0xFFFC] = 0x00;
+        rom[0xFFFD] = 0x80;
+
+        // Test jump to address 0x0000
+        rom[0x8000] = 0x00;
+        rom[0x8001] = 0x00;
+
+        cpu.insert_rom(rom);
+        cpu.program_counter = 0x8000;
+
+        let jmp = JMP {
+            addressing_mode: AddressingMode::Absolute,
+        };
+
+        jmp.execute(&mut cpu, 3);
+
+        assert_eq!(
+            cpu.program_counter, 0x0000,
+            "PC should jump to address 0x0000"
+        );
+    }
+
+    #[test]
+    fn test_jmp_absolute_high_address() {
+        let mut cpu = CPU::new();
+        let mut rom = vec![0; 0xFFFE];
+
+        rom[0xFFFC] = 0x00;
+        rom[0xFFFD] = 0x80;
+
+        // Test jump to address 0xFFFF
+        rom[0x8000] = 0xFF;
+        rom[0x8001] = 0xFF;
+
+        cpu.insert_rom(rom);
+        cpu.program_counter = 0x8000;
+
+        let jmp = JMP {
+            addressing_mode: AddressingMode::Absolute,
+        };
+
+        jmp.execute(&mut cpu, 3);
+
+        assert_eq!(
+            cpu.program_counter, 0xFFFF,
+            "PC should jump to address 0xFFFF"
+        );
+    }
+
+    #[test]
+    fn test_jmp_indirect_edge_cases() {
+        let mut cpu = CPU::new();
+        let mut rom = vec![0; 0xFFFE];
+
+        rom[0xFFFC] = 0x00;
+        rom[0xFFFD] = 0x80;
+
+        // JMP ($0000) - indirect from address 0x0000
+        rom[0x8000] = 0x00;
+        rom[0x8001] = 0x00;
+
+        cpu.insert_rom(rom);
+        cpu.program_counter = 0x8000;
+
+        // Set up target address at 0x0000
+        cpu.write_byte(0x0000, 0xAB);
+        cpu.write_byte(0x0001, 0xCD);
+
+        let jmp = JMP {
+            addressing_mode: AddressingMode::Indirect,
+        };
+
+        jmp.execute(&mut cpu, 5);
+
+        assert_eq!(
+            cpu.program_counter, 0xCDAB,
+            "PC should jump to indirect target address 0xCDAB"
+        );
+    }
+
+    #[test]
+    fn test_jmp_indirect_page_boundary() {
+        let mut cpu = CPU::new();
+        let mut rom = vec![0; 0xFFFE];
+
+        rom[0xFFFC] = 0x00;
+        rom[0xFFFD] = 0x80;
+
+        // JMP ($10FF) - test page boundary behavior
+        rom[0x8000] = 0xFF;
+        rom[0x8001] = 0x10;
+
+        cpu.insert_rom(rom);
+        cpu.program_counter = 0x8000;
+
+        // Set up target address at page boundary
+        cpu.write_byte(0x10FF, 0x12); // Low byte
+        cpu.write_byte(0x1100, 0x34); // High byte (crosses page boundary)
+
+        let jmp = JMP {
+            addressing_mode: AddressingMode::Indirect,
+        };
+
+        jmp.execute(&mut cpu, 5);
+
+        assert_eq!(
+            cpu.program_counter, 0x3412,
+            "PC should jump to address 0x3412 even with page boundary crossing"
+        );
+    }
+
+    #[test]
+    fn test_jmp_self_loop() {
+        let mut cpu = CPU::new();
+        let mut rom = vec![0; 0xFFFE];
+
+        rom[0xFFFC] = 0x00;
+        rom[0xFFFD] = 0x80;
+
+        // JMP $8000 - jump to itself (infinite loop)
+        rom[0x8000] = 0x00;
+        rom[0x8001] = 0x80;
+
+        cpu.insert_rom(rom);
+        cpu.program_counter = 0x8000;
+
+        let jmp = JMP {
+            addressing_mode: AddressingMode::Absolute,
+        };
+
+        jmp.execute(&mut cpu, 3);
+
+        assert_eq!(
+            cpu.program_counter, 0x8000,
+            "PC should jump back to itself creating a loop"
+        );
+    }
+
+    #[test]
+    fn test_jmp_indirect_self_reference() {
+        let mut cpu = CPU::new();
+        let mut rom = vec![0; 0xFFFE];
+
+        rom[0xFFFC] = 0x00;
+        rom[0xFFFD] = 0x80;
+
+        // JMP ($1000) where $1000 contains $8000
+        rom[0x8000] = 0x00;
+        rom[0x8001] = 0x10;
+
+        cpu.insert_rom(rom);
+        cpu.program_counter = 0x8000;
+
+        // Set up indirect address to point back to 0x8000
+        cpu.write_byte(0x1000, 0x00);
+        cpu.write_byte(0x1001, 0x80);
+
+        let jmp = JMP {
+            addressing_mode: AddressingMode::Indirect,
+        };
+
+        jmp.execute(&mut cpu, 5);
+
+        assert_eq!(
+            cpu.program_counter, 0x8000,
+            "PC should jump back to 0x8000 through indirect addressing"
         );
     }
 }
