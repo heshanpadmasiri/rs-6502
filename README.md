@@ -76,6 +76,9 @@ ROM files must be 64KB (65536 bytes) and follow the 6502 memory layout:
 - **LDA** - Load Accumulator
 - **STA** - Store Accumulator
 - **BRK** - Break
+- **ADC** - Add with Carry
+- **CLC** - Clear Carry Flag
+- **SEC** - Set Carry Flag
 
 ## Addressing Modes
 
