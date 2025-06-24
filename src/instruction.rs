@@ -282,6 +282,18 @@ impl Instruction for CLC {
     }
 }
 
+pub struct SEC {}
+
+impl Instruction for SEC {
+    fn execute(&self, cpu: &mut CPU, current_tick: u8) -> bool {
+        if current_tick < 2 {
+            return false;
+        }
+        cpu.set_flag(StatusFlags::Carry);
+        true
+    }
+}
+
 pub struct JMP {
     pub addressing_mode: AddressingMode,
 }
@@ -461,6 +473,10 @@ pub fn init_op_table() -> [Option<Box<dyn Instruction>>; 256] {
         InstructionData {
             instruction: Box::new(CLC {}),
             opc: 0x18,
+        },
+        InstructionData {
+            instruction: Box::new(SEC {}),
+            opc: 0x38,
         },
         InstructionData {
             instruction: Box::new(STA {
@@ -2967,6 +2983,236 @@ mod tests {
         assert!(
             !cpu.is_flag_set(StatusFlags::Carry),
             "Carry flag should not be set after adding 0x01 to 0x00"
+        );
+    }
+
+    #[test]
+    fn test_sec_basic() {
+        let mut cpu = CPU::new();
+        let mut rom = vec![0; 0xFFFE];
+
+        rom[0xFFFC] = 0x00;
+        rom[0xFFFD] = 0x80;
+
+        cpu.insert_rom(rom);
+        cpu.program_counter = 0x8000;
+
+        // Set carry flag before executing SEC
+        cpu.reset_flag(StatusFlags::Carry);
+
+        let sec = SEC {};
+
+        sec.execute(&mut cpu, 2);
+
+        assert!(
+            cpu.is_flag_set(StatusFlags::Carry),
+            "Carry flag should be set after SEC"
+        );
+    }
+
+    #[test]
+    fn test_sec_timing() {
+        let mut cpu = CPU::new();
+        let mut rom = vec![0; 0xFFFE];
+
+        rom[0xFFFC] = 0x00;
+        rom[0xFFFD] = 0x80;
+
+        cpu.insert_rom(rom);
+        cpu.program_counter = 0x8000;
+        cpu.reset_flag(StatusFlags::Carry);
+
+        let sec = SEC {};
+
+        // Should not complete with insufficient ticks
+        let result = sec.execute(&mut cpu, 1);
+        assert!(!result, "SEC should not complete with insufficient ticks");
+        assert!(
+            !cpu.is_flag_set(StatusFlags::Carry),
+            "Carry flag should not change with insufficient ticks"
+        );
+
+        // Should complete with sufficient ticks
+        let result = sec.execute(&mut cpu, 2);
+        assert!(result, "SEC should complete with sufficient ticks");
+        assert!(
+            cpu.is_flag_set(StatusFlags::Carry),
+            "Carry flag should be set with sufficient ticks"
+        );
+    }
+
+    #[test]
+    fn test_sec_does_not_affect_other_flags() {
+        let mut cpu = CPU::new();
+        let mut rom = vec![0; 0xFFFE];
+
+        rom[0xFFFC] = 0x00;
+        rom[0xFFFD] = 0x80;
+
+        cpu.insert_rom(rom);
+        cpu.program_counter = 0x8000;
+
+        // Set all flags before executing SEC
+        cpu.set_flag(StatusFlags::Carry);
+        cpu.set_flag(StatusFlags::Zero);
+        cpu.set_flag(StatusFlags::Negative);
+        cpu.set_flag(StatusFlags::Overflow);
+        cpu.set_flag(StatusFlags::Break);
+        cpu.set_flag(StatusFlags::Decimal);
+        cpu.set_flag(StatusFlags::InterruptDisable);
+
+        let sec = SEC {};
+
+        sec.execute(&mut cpu, 2);
+
+        // Only carry flag should be set
+        assert!(
+            cpu.is_flag_set(StatusFlags::Carry),
+            "Carry flag should remain set"
+        );
+        assert!(
+            cpu.is_flag_set(StatusFlags::Zero),
+            "Zero flag should remain set"
+        );
+        assert!(
+            cpu.is_flag_set(StatusFlags::Negative),
+            "Negative flag should remain set"
+        );
+        assert!(
+            cpu.is_flag_set(StatusFlags::Overflow),
+            "Overflow flag should remain set"
+        );
+        assert!(
+            cpu.is_flag_set(StatusFlags::Break),
+            "Break flag should remain set"
+        );
+        assert!(
+            cpu.is_flag_set(StatusFlags::Decimal),
+            "Decimal flag should remain set"
+        );
+        assert!(
+            cpu.is_flag_set(StatusFlags::InterruptDisable),
+            "Interrupt disable flag should remain set"
+        );
+    }
+
+    #[test]
+    fn test_sec_does_not_affect_registers() {
+        let mut cpu = CPU::new();
+        let mut rom = vec![0; 0xFFFE];
+
+        rom[0xFFFC] = 0x00;
+        rom[0xFFFD] = 0x80;
+
+        cpu.insert_rom(rom);
+        cpu.program_counter = 0x8000;
+
+        // Set initial register values
+        cpu.accumulator = 0x42;
+        cpu.x = 0x33;
+        cpu.y = 0x55;
+        cpu.stack_pointer = 0xFD;
+        cpu.reset_flag(StatusFlags::Carry);
+
+        let sec = SEC {};
+
+        sec.execute(&mut cpu, 2);
+
+        // SEC should not affect any registers
+        assert_eq!(cpu.accumulator, 0x42, "Accumulator should not change");
+        assert_eq!(cpu.x, 0x33, "X register should not change");
+        assert_eq!(cpu.y, 0x55, "Y register should not change");
+        assert_eq!(cpu.stack_pointer, 0xFD, "Stack pointer should not change");
+        assert!(
+            cpu.is_flag_set(StatusFlags::Carry),
+            "Carry flag should be set"
+        );
+    }
+
+    #[test]
+    fn test_sec_when_carry_already_set() {
+        let mut cpu = CPU::new();
+        let mut rom = vec![0; 0xFFFE];
+
+        rom[0xFFFC] = 0x00;
+        rom[0xFFFD] = 0x80;
+
+        cpu.insert_rom(rom);
+        cpu.program_counter = 0x8000;
+
+        // Ensure carry flag is already set
+        cpu.set_flag(StatusFlags::Carry);
+
+        let sec = SEC {};
+
+        sec.execute(&mut cpu, 2);
+
+        // Carry flag should remain set
+        assert!(
+            cpu.is_flag_set(StatusFlags::Carry),
+            "Carry flag should remain set"
+        );
+    }
+
+    #[test]
+    fn test_rom_sec_execution() {
+        let mut cpu = CPU::new();
+        let mut rom = vec![0; 0xFFFE];
+
+        // Set reset vector to 0x8000
+        rom[0xFFFC] = 0x00;
+        rom[0xFFFD] = 0x80;
+
+        // Program: SEC, BRK
+        rom[0x8000] = 0x38; // SEC opcode
+        rom[0x8001] = 0x00; // BRK opcode
+
+        // Set carry flag before execution
+        cpu.reset_flag(StatusFlags::Carry);
+
+        crate::execute_rom(&mut cpu, rom);
+
+        // Verify carry flag was set
+        assert!(
+            cpu.is_flag_set(StatusFlags::Carry),
+            "Carry flag should be set after SEC"
+        );
+
+        // Verify BRK was executed
+        assert!(
+            cpu.is_flag_set(StatusFlags::Break),
+            "Break flag should be set after BRK instruction"
+        );
+    }
+
+    #[test]
+    fn test_sec_followed_by_adc() {
+        let mut cpu = CPU::new();
+        let mut rom = vec![0; 0xFFFE];
+
+        // Set reset vector to 0x8000
+        rom[0xFFFC] = 0x00;
+        rom[0xFFFD] = 0x80;
+
+        // Program: SEC, ADC #$01, BRK
+        rom[0x8000] = 0x38; // SEC opcode
+        rom[0x8001] = 0x69; // ADC immediate opcode
+        rom[0x8002] = 0x01; // Value to add
+        rom[0x8003] = 0x00; // BRK opcode
+
+        cpu.accumulator = 0x00;
+        cpu.reset_flag(StatusFlags::Carry); // Clear carry flag
+
+        crate::execute_rom(&mut cpu, rom);
+
+        // Verify SEC set the carry flag, so ADC adds 0x01 + 1 (carry) = 0x02
+        assert_eq!(
+            cpu.accumulator, 0x02,
+            "Accumulator should contain 0x02 (0x00 + 0x01 + 1 from carry)"
+        );
+        assert!(
+            !cpu.is_flag_set(StatusFlags::Carry),
+            "Carry flag should be cleared after adding 0x01 + 1 to 0x00"
         );
     }
 }
