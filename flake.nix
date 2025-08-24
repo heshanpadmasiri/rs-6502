@@ -4,24 +4,36 @@
   };
 
   outputs = { self, nixpkgs }: let 
-    pkgs = nixpkgs.legacyPackages."x86_64-linux";
+    system = "x86_64-linux";
+    pkgs = nixpkgs.legacyPackages.${system};
   in {
-    devShells."x86_64-linux".default = pkgs.mkShell {
-    buildInputs = with pkgs; [
+    devShells.${system}.default = pkgs.mkShell {
+      buildInputs = with pkgs; [
         cargo rustc rustfmt clippy rust-analyzer fish lldb
+        glibc gcc
+        vscode-extensions.vadimcn.vscode-lldb
       ];
 
-    nativeBuildInputs = [ pkgs.pkg-config ];
+      nativeBuildInputs = [ pkgs.pkg-config ];
 
-    env = {
+      env = {
         RUST_SRC_PATH = "${pkgs.rust.packages.stable.rustPlatform.rustLibSrc}";
-        SHELL = "${pkgs.fish}/bin/fish"; # default shell inside nix develop
+        SHELL = "${pkgs.fish}/bin/fish";
+
+        # Adapter executable and liblldb shipped with the VSCode extension in nixpkgs:
+        CODELLDB_PATH =
+          "${pkgs.vscode-extensions.vadimcn.vscode-lldb}/share/vscode/extensions/vadimcn.vscode-lldb/adapter/codelldb";
+        LIBLLDB_PATH =
+          "${pkgs.vscode-extensions.vadimcn.vscode-lldb}/share/vscode/extensions/vadimcn.vscode-lldb/lldb/lib/liblldb.so";
       };
 
-
       shellHook = ''
-        exec fish -C 'alias vim nvim; alias lg lazygit'
+        # aliases for fish
+        exec fish -C '
+          alias vim nvim
+          alias lg lazygit
+        '
       '';
-  };
+    };
   };
 }
